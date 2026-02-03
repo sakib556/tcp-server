@@ -1,6 +1,9 @@
 const express = require('express');
 const cors = require('cors');
-const { sendUnlockCommand, sendLockCommand } = require('./server'); // Import functions from server.js
+const { sendUnlockCommand, sendLockCommand, createTCP } = require('./server');
+
+// Start TCP server (port 12345) so API and TCP share the same connected clients
+createTCP();
 
 const app = express();
 const PORT = 5000;
@@ -29,7 +32,7 @@ app.post('/lock', (req, res) => {
     res.json({ success: true, message: response });
 });
 
-// ✅ Start the API Server
+// Start the HTTP API (port 5000) – same process as TCP server
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 API Server running on http://0.0.0.0:${PORT}`);
 });

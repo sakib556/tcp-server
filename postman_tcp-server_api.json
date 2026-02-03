@@ -1,0 +1,57 @@
+{
+  "info": {
+    "name": "TCP Server – Lock API",
+    "description": "Test the HTTP API (api.js) for unlock/lock. Run `node api.js` so the API is available on port 5000. The TCP server on port 12345 is raw TCP and cannot be tested with Postman.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://72.62.250.238:5000",
+      "type": "string"
+    },
+    {
+      "key": "imei",
+      "value": "123456789012345",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Unlock",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"imei\": \"{{imei}}\"\n}"
+        },
+        "url": "{{baseUrl}}/unlock",
+        "description": "Send unlock command to the lock with the given IMEI. Lock must be connected via TCP to the server."
+      }
+    },
+    {
+      "name": "Lock",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"imei\": \"{{imei}}\"\n}"
+        },
+        "url": "{{baseUrl}}/lock",
+        "description": "Send lock command to the lock with the given IMEI. Lock must be connected via TCP to the server."
+      }
+    }
+  ]
+}

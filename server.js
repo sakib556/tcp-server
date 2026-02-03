@@ -357,12 +357,12 @@ function processDeviceResponse(imei, command, message, deviceInfo) {
     deviceInfo.lastSeen = new Date();
 }
 
-// Start the Server and Echo Commands 
-// Start TCP Server only if executed directly
+// Start the Server and Echo Commands when run directly (CLI)
 if (require.main === module) {
     createTCP();
-    echoCommands();
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.on('line', (line) => echoCommands(line));
 }
 
-// Export functions for `api.js`
-module.exports = { sendUnlockCommand, sendLockCommand };
+// Export for `api.js` (TCP + API in one process)
+module.exports = { sendUnlockCommand, sendLockCommand, createTCP };
