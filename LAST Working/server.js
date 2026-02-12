@@ -139,7 +139,8 @@ function sendUnlockCommand(imei) {
     }
 
     if (!client.socket.writable) {
-        console.log(`❌ Connection to lock ${imei} is closed.`);
+        console.log(`❌ Cannot send unlock: lock ${imei} has disconnected. Device must reconnect to TCP server.`);
+        removeClientBySocket(client.socket);
         return;
     }
 

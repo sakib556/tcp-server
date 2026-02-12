@@ -6,14 +6,33 @@ const HOST = '0.0.0.0';
 
 const clients = new Map(); // IMEI -> { socket, key, battery, status, lastSeen, gsmSignal, alarm, autolock }
 
+// Connection check: use socket.destroyed only. Do NOT use socket.writable – writable can be
+// false when the write buffer is full (TCP backpressure) but the connection is still alive and
+// we are still receiving data. Client is removed only on socket 'end' / 'error' / 'close'.
+function removeClientBySocket(closedSocket) {
+    for (const [imei, client] of clients.entries()) {
+        if (client.socket === closedSocket) {
+            clients.delete(imei);
+            console.log(`📴 Lock ${imei} disconnected (removed from list). Reconnect to send commands.`);
+            return;
+        }
+    }
+}
+
 // Create TCP Server
 function createTCP() {
     const server = net.createServer((socket) => {
         console.log('🔗 New connection established.');
 
         socket.on('data', (data) => incomingData(socket, data));
-        socket.on('end', () => console.log('❌ Client disconnected.'));
-        socket.on('error', (err) => console.log(`⚠ Error: ${err.message}`));
+        socket.on('end', () => {
+            removeClientBySocket(socket);
+        });
+        socket.on('error', (err) => {
+            console.log(`⚠ Socket error: ${err.message}`);
+            removeClientBySocket(socket);
+        });
+        socket.on('close', () => removeClientBySocket(socket));
     });
 
     server.listen(PORT, HOST, () => console.log(`🚀 TCP Server running on ${HOST}:${PORT}`));
@@ -30,16 +49,39 @@ function incomingData(socket, data) {
     return; // Stop further processing
     }
 
-    // **Handle Lock Protocol Messages**
-    const match = message.match(/\*BGCR,OM,(\d{15}),(Q0|H0|R0|L0|L1|S5|W0|S1|S8),(.+)#/);
-    if (!match) {
+    // **Handle Lock Protocol Messages** (expected: *BGCR,OM,IMEI,COMMAND,params#)
+    let match = message.match(/\*BGCR,OM,(\d{15}),(Q0|H0|R0|L0|L1|S5|W0|S1|S8),(.+)#/);
+    let imei, command, params;
+
+    if (match) {
+        imei = match[1];
+        command = match[2];
+        params = match[3].split(',');
+    } else {
+        // Some devices send BGCK,ON,IMEI,keyOrNo,...# (e.g. heartbeat/status)
+        const bgckMatch = message.match(/BGCK,ON,(\d{15}),([^,]*),(.+)#/);
+        if (bgckMatch) {
+            imei = bgckMatch[1];
+            const keyOrNo = (bgckMatch[2] || '').trim();
+            const rest = (bgckMatch[3] || '').split(',');
+            if (!clients.has(imei)) {
+                clients.set(imei, { socket, key: null, lastSeen: Date.now() });
+                console.log(`✅ Lock ${imei} connected (BGCK format).`);
+            }
+            clients.get(imei).lastSeen = Date.now();
+            if (keyOrNo && keyOrNo !== 'no' && keyOrNo.length > 0) {
+                clients.get(imei).key = keyOrNo;
+                console.log(`🔑 Stored key for lock ${imei} (from BGCK): ${keyOrNo}`);
+            }
+            if (rest.length >= 2) {
+                clients.get(imei).battery = rest[1];
+                clients.get(imei).gsmSignal = rest[2];
+            }
+            return;
+        }
         console.log("⚠ Received unknown data:", message);
         return;
     }
-
-    const imei = match[1];
-    const command = match[2];
-    const params = match[3].split(',');
 
     if (!clients.has(imei)) {
     clients.set(imei, { socket, key: null, lastSeen: Date.now() });
@@ -144,8 +186,11 @@ function sendUnlockCommand(imei) {
         return;
     }
 
-    if (!client.socket.writable) {
-        console.log(`❌ Connection to lock ${imei} is closed.`);
+    // Don't use socket.writable – it can be false when buffer is full but connection is alive.
+    // Only skip if socket is actually destroyed (real disconnect).
+    if (client.socket.destroyed) {
+        console.log(`❌ Lock ${imei} socket is destroyed (disconnected). Removed from list.`);
+        removeClientBySocket(client.socket);
         return;
     }
 
@@ -183,8 +228,9 @@ function sendLockCommand(imei) {
         return;
     }
 
-    if (!client.socket.writable) {
-        console.log(`❌ Connection to lock ${imei} is closed.`);
+    if (client.socket.destroyed) {
+        console.log(`❌ Lock ${imei} socket is destroyed (disconnected). Removed from list.`);
+        removeClientBySocket(client.socket);
         return;
     }
 
@@ -194,11 +240,12 @@ function sendLockCommand(imei) {
 }
 
 
-// Request New Key
+// Request New Key (server asks lock to send key; lock should reply with *BGCR,OM,imei,R0,key,...#)
 function requestNewKey(imei) {
     if (!clients.has(imei)) return;
-    clients.get(imei).socket.write(`*BGCS,OM,${imei},R0,0,300,20,${Math.floor(Date.now() / 1000)}#\n`);
-    console.log(`🔄 Requested new key for ${imei}`);
+    const msg = `*BGCS,OM,${imei},R0,0,300,20,${Math.floor(Date.now() / 1000)}#\n`;
+    clients.get(imei).socket.write(msg);
+    console.log(`🔄 Requested new key for ${imei} (watch for device reply with R0,key in *BGCR,OM,...)`);
 }
 
 // Handle Lock Responses
@@ -211,7 +258,9 @@ function handleLockResponse(imei, command, status) {
 // Send Acknowledgment
 function sendAck(imei, command) {
     if (!clients.has(imei)) return;
-    clients.get(imei).socket.write(`*BGCS,OM,${imei},Re,${command}#\n`);
+    const client = clients.get(imei);
+    if (client.socket.destroyed) return; // no log spam; client will be removed on 'close'
+    client.socket.write(`*BGCS,OM,${imei},Re,${command}#\n`);
     console.log(`✅ Sent ACK for ${command} to ${imei}`);
 }
 
