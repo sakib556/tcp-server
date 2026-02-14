@@ -15,20 +15,26 @@ app.use(cors());
 // ✅ API Route to Unlock a Lock
 app.post('/unlock', (req, res) => {
     const { imei } = req.body;
+    console.log('[DEBUG] API POST /unlock – body:', JSON.stringify(req.body), 'imei=', imei);
     if (!imei) {
+        console.log('[DEBUG] API /unlock – missing imei, 400');
         return res.status(400).json({ success: false, error: "IMEI is required" });
     }
     const response = sendUnlockCommand(imei);
+    console.log('[DEBUG] API /unlock – response from sendUnlockCommand:', response);
     res.json({ success: true, message: response });
 });
 
 // ✅ API Route to Lock a Lock
 app.post('/lock', (req, res) => {
     const { imei } = req.body;
+    console.log('[DEBUG] API POST /lock – body:', JSON.stringify(req.body), 'imei=', imei);
     if (!imei) {
+        console.log('[DEBUG] API /lock – missing imei, 400');
         return res.status(400).json({ success: false, error: "IMEI is required" });
     }
     const response = sendLockCommand(imei);
+    console.log('[DEBUG] API /lock – response from sendLockCommand:', response);
     res.json({ success: true, message: response });
 });
 

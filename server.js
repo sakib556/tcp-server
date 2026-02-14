@@ -4,49 +4,72 @@ const readline = require('readline');
 const PORT = 12345;
 const HOST = '0.0.0.0';
 
+// Set to false to disable [DEBUG] logs (e.g. in production)
+const DEBUG = true;
+function debug(...args) {
+    if (DEBUG) console.log('[DEBUG]', ...args);
+}
+
 const clients = new Map(); // IMEI -> { socket, key, battery, status, lastSeen, gsmSignal, alarm, autolock }
 
 // Connection check: use socket.destroyed only. Do NOT use socket.writable – writable can be
 // false when the write buffer is full (TCP backpressure) but the connection is still alive and
 // we are still receiving data. Client is removed only on socket 'end' / 'error' / 'close'.
 function removeClientBySocket(closedSocket) {
+    debug('removeClientBySocket() – checking', clients.size, 'clients');
     for (const [imei, client] of clients.entries()) {
         if (client.socket === closedSocket) {
             clients.delete(imei);
             console.log(`📴 Lock ${imei} disconnected (removed from list). Reconnect to send commands.`);
+            debug('removeClientBySocket() – removed IMEI', imei, '; remaining clients:', clients.size);
             return;
         }
     }
+    debug('removeClientBySocket() – no matching socket found');
 }
 
 // Create TCP Server
 function createTCP() {
+    debug('createTCP() – creating server', HOST, PORT);
     const server = net.createServer((socket) => {
+        const remote = `${socket.remoteAddress}:${socket.remotePort}`;
         console.log('🔗 New connection established.');
+        debug('createTCP() – new socket from', remote);
 
         socket.on('data', (data) => incomingData(socket, data));
         socket.on('end', () => {
+            debug('createTCP() – socket end event from', remote);
             removeClientBySocket(socket);
         });
         socket.on('error', (err) => {
             console.log(`⚠ Socket error: ${err.message}`);
+            debug('createTCP() – socket error from', remote, err.message);
             removeClientBySocket(socket);
         });
-        socket.on('close', () => removeClientBySocket(socket));
+        socket.on('close', () => {
+            debug('createTCP() – socket close event from', remote);
+            removeClientBySocket(socket);
+        });
     });
 
-    server.listen(PORT, HOST, () => console.log(`🚀 TCP Server running on ${HOST}:${PORT}`));
+    server.listen(PORT, HOST, () => {
+        console.log(`🚀 TCP Server running on ${HOST}:${PORT}`);
+        debug('createTCP() – listening on', HOST, PORT);
+    });
 }
 
 // Handle Incoming Data
 function incomingData(socket, data) {
-    const message = data.toString().trim();
+    const raw = data.toString();
+    const message = raw.trim();
     console.log(`📩 Data received: ${message}`);
+    debug('incomingData() – raw length:', raw.length, 'trimmed length:', message.length);
 
     // **Handle Manual Commands (unlock, lock, restart)**
     if (message.startsWith("unlock ") || message.startsWith("lock ") || message.startsWith("restart ")) {
-    echoCommands(message);
-    return; // Stop further processing
+        debug('incomingData() – treating as manual command:', message.substring(0, 30) + '...');
+        echoCommands(message);
+        return;
     }
 
     // **Handle Lock Protocol Messages** (expected: *BGCR,OM,IMEI,COMMAND,params#)
@@ -57,6 +80,7 @@ function incomingData(socket, data) {
         imei = match[1];
         command = match[2];
         params = match[3].split(',');
+        debug('incomingData() – parsed BGCR: imei=', imei, 'command=', command, 'params=', params.join(','));
     } else {
         // Some devices send BGCK,ON,IMEI,keyOrNo,...# (e.g. heartbeat/status)
         const bgckMatch = message.match(/BGCK,ON,(\d{15}),([^,]*),(.+)#/);
@@ -64,6 +88,7 @@ function incomingData(socket, data) {
             imei = bgckMatch[1];
             const keyOrNo = (bgckMatch[2] || '').trim();
             const rest = (bgckMatch[3] || '').split(',');
+            debug('incomingData() – parsed BGCK: imei=', imei, 'keyOrNo=', keyOrNo);
             if (!clients.has(imei)) {
                 clients.set(imei, { socket, key: null, lastSeen: Date.now() });
                 console.log(`✅ Lock ${imei} connected (BGCK format).`);
@@ -80,151 +105,184 @@ function incomingData(socket, data) {
             return;
         }
         console.log("⚠ Received unknown data:", message);
+        debug('incomingData() – no BGCR/BGCK match for:', message.substring(0, 80));
         return;
     }
 
     if (!clients.has(imei)) {
         clients.set(imei, { socket, key: null, lastSeen: Date.now() });
         console.log(`✅ Lock ${imei} connected.`);
-        // Do NOT call getDeviceStatus here: it sends S1 (restart) and S8 (beep), causes timeouts
-        // and can disconnect the lock. Unlock/lock work from normal Q0/H0/R0 traffic only.
+        debug('incomingData() – new client added for', imei, '; total clients:', clients.size);
     }
 
     clients.get(imei).lastSeen = Date.now();
+    debug('incomingData() – calling processData(', imei, command, params.length, 'params)');
     processData(imei, command, params);
 }
 
 
 // Process Incoming Data
 function processData(imei, command, params) {
+    debug('processData() – imei=', imei, 'command=', command, 'params=', params.join(','));
     const client = clients.get(imei);
+    if (!client) {
+        debug('processData() – no client for', imei, 'skipping');
+        return;
+    }
     switch (command) {
         case 'Q0': // Sign-in
             client.battery = params[0];
             client.status = params[2];
             console.log(`🔑 Lock ${imei} signed in. Battery: ${client.battery}mV, Status: ${client.status}`);
+            debug('processData() Q0 – stored battery, status');
             break;
         case 'H0': // Heartbeat
             client.battery = params[1];
             client.gsmSignal = params[2];
             console.log(`💓 Heartbeat from ${imei}. Battery: ${client.battery}mV, GSM: ${client.gsmSignal}`);
+            debug('processData() H0 – updated battery, gsmSignal');
             break;
         case 'R0': // Operation Key Request
             client.key = params[1];
             console.log(`🔑 Stored key for lock ${imei}: ${client.key}`);
+            debug('processData() R0 – stored key =', client.key);
             break;
         case 'L0': // Unlock Response
         case 'L1': // Lock Response
-            // Some devices send key in L0/L1 response (params[1]) – store if we don't have one
             if (!client.key && params[1]) {
                 client.key = params[1];
                 console.log(`🔑 Stored key for lock ${imei} (from ${command} response): ${client.key}`);
+                debug('processData()', command, '– stored key from params[1] =', client.key);
             }
+            debug('processData()', command, '– calling handleLockResponse status=', params[0]);
             handleLockResponse(imei, command, params[0], params);
             break;
         case 'S5': // Device Info
             console.log(`ℹ️ Device Info for ${imei}: Battery ${params[0]}mV, GSM: ${params[2]}, Status: ${params[3]}`);
+            debug('processData() S5 – device info');
             break;
         case 'W0': // Alarm Triggered
+            debug('processData() W0 – alarm status=', params[0]);
             handleAlarm(imei, params[0]);
             break;
         case 'S1': // Restart Lock
+            debug('processData() S1 – delegating to restartLock');
             restartLock(imei);
             break;
         case 'S8': // Find Lock (Alarm Sound)
+            debug('processData() S8 – find lock');
             handleFindLock(imei);
             break;
+        default:
+            debug('processData() – unhandled command', command);
     }
 }
 
 // Manual Command Handler
 function echoCommands(input) {
+    debug('echoCommands() – input:', typeof input === 'string' ? input.substring(0, 50) : input);
     if (!input || typeof input !== "string") {
         console.log("⚠ Error: Received invalid command input.");
         return;
     }
 
     const [command, imei] = input.split(/[ ,]+/); // Supports both spaces and commas
+    debug('echoCommands() – parsed command=', command, 'imei=', imei);
 
     if (!imei) {
         console.log("⚠ Error: IMEI missing in command.");
         return;
     }
 
-    if (command === "unlock") sendUnlockCommand(imei);
-    else if (command === "lock") sendLockCommand(imei);
-    else if (command === "restart") restartLock(imei);
-    else console.log("⚠ Invalid command! Use 'unlock IMEI', 'lock IMEI', or 'restart IMEI'");
+    if (command === "unlock") {
+        debug('echoCommands() – calling sendUnlockCommand(', imei, ')');
+        sendUnlockCommand(imei);
+    } else if (command === "lock") {
+        debug('echoCommands() – calling sendLockCommand(', imei, ')');
+        sendLockCommand(imei);
+    } else if (command === "restart") {
+        debug('echoCommands() – calling restartLock(', imei, ')');
+        restartLock(imei);
+    } else {
+        console.log("⚠ Invalid command! Use 'unlock IMEI', 'lock IMEI', or 'restart IMEI'");
+    }
 }
 
 
 
 // Unlock Command
 function sendUnlockCommand(imei) {
+    debug('sendUnlockCommand() – imei=', imei, 'clients.has(imei)=', clients.has(imei));
     if (!clients.has(imei)) {
         console.log(`❌ Lock ${imei} is not connected.`);
         return;
     }
     
     const client = clients.get(imei);
+    debug('sendUnlockCommand() – client.key=', client.key, 'socket.destroyed=', client.socket.destroyed);
 
     // Check if key is available
     if (!client.key) {
         console.log(`🔄 Key not available for ${imei}, requesting a new key...`);
+        debug('sendUnlockCommand() – no key, calling requestNewKey and starting key poll');
         requestNewKey(imei);
 
-        // Wait for key update (Polling every 500ms, timeout after 5 seconds)
         let attempts = 0;
         const keyCheckInterval = setInterval(() => {
             if (client.key) {
                 clearInterval(keyCheckInterval);
                 console.log(`🔑 New key obtained for ${imei}: ${client.key}`);
-                sendUnlockCommand(imei); // Retry unlock after key retrieval
+                debug('sendUnlockCommand() – key received, retrying unlock');
+                sendUnlockCommand(imei);
             } else if (attempts++ >= 10) {
                 clearInterval(keyCheckInterval);
                 console.log(`❌ Error in obtaining key for ${imei}`);
+                debug('sendUnlockCommand() – key timeout after 10 attempts');
             }
         }, 500);
         return;
     }
 
-    // Don't use socket.writable – it can be false when buffer is full but connection is alive.
-    // Only skip if socket is actually destroyed (real disconnect).
     if (client.socket.destroyed) {
         console.log(`❌ Lock ${imei} socket is destroyed (disconnected). Removed from list.`);
         removeClientBySocket(client.socket);
         return;
     }
 
-    const unlockCommand = `*BGCS,OM,${imei},L0,${client.key},20,${Math.floor(Date.now() / 1000)}#\n`;
+    const ts = Math.floor(Date.now() / 1000);
+    const unlockCommand = `*BGCS,OM,${imei},L0,${client.key},20,${ts}#\n`;
+    debug('sendUnlockCommand() – SENDING (TCP):', unlockCommand.trim());
     client.socket.write(unlockCommand);
     console.log(`✅ Sent UNLOCK to ${imei}`);
 }
 
 // Lock Command
 function sendLockCommand(imei) {
+    debug('sendLockCommand() – imei=', imei, 'clients.has(imei)=', clients.has(imei));
     if (!clients.has(imei)) {
         console.log(`❌ Lock ${imei} is not connected.`);
         return;
     }
     
     const client = clients.get(imei);
+    debug('sendLockCommand() – client.key=', client.key, 'socket.destroyed=', client.socket.destroyed);
 
-    // Check if key is available
     if (!client.key) {
         console.log(`🔄 Key not available for ${imei}, requesting a new key...`);
+        debug('sendLockCommand() – no key, calling requestNewKey and starting key poll');
         requestNewKey(imei);
 
-        // Wait for key update (Polling every 500ms, timeout after 5 seconds)
         let attempts = 0;
         const keyCheckInterval = setInterval(() => {
             if (client.key) {
                 clearInterval(keyCheckInterval);
                 console.log(`🔑 New key obtained for ${imei}: ${client.key}`);
-                sendLockCommand(imei); // Retry lock after key retrieval
+                debug('sendLockCommand() – key received, retrying lock');
+                sendLockCommand(imei);
             } else if (attempts++ >= 10) {
                 clearInterval(keyCheckInterval);
                 console.log(`❌ Error in obtaining key for ${imei}`);
+                debug('sendLockCommand() – key timeout after 10 attempts');
             }
         }, 500);
         return;
@@ -237,14 +295,21 @@ function sendLockCommand(imei) {
     }
 
     const lockCommand = `*BGCS,OM,${imei},L1,${client.key}#\n`;
+    debug('sendLockCommand() – SENDING (TCP):', lockCommand.trim());
     client.socket.write(lockCommand);
     console.log(`✅ Sent LOCK to ${imei}`);
 }
 
 // Request New Key (server asks lock to send key; lock should reply with *BGCR,OM,imei,R0,key,...#)
 function requestNewKey(imei) {
-    if (!clients.has(imei)) return;
-    const msg = `*BGCS,OM,${imei},R0,0,300,20,${Math.floor(Date.now() / 1000)}#\n`;
+    debug('requestNewKey() – imei=', imei);
+    if (!clients.has(imei)) {
+        debug('requestNewKey() – no client, return');
+        return;
+    }
+    const ts = Math.floor(Date.now() / 1000);
+    const msg = `*BGCS,OM,${imei},R0,0,300,20,${ts}#\n`;
+    debug('requestNewKey() – SENDING (TCP):', msg.trim());
     clients.get(imei).socket.write(msg);
     console.log(`🔄 Requested new key for ${imei} (watch for device reply with R0,key in *BGCR,OM,...)`);
 }
@@ -252,47 +317,72 @@ function requestNewKey(imei) {
 // Handle Lock Responses
 // Status: 0 = success, 1 = state (e.g. locked/unlocked), 3 = key expired
 function handleLockResponse(imei, command, status, params) {
-    if (status === "0") sendAck(imei, command);
-    else if (status === "1") {
-        // Many devices use 1 for "current state" (e.g. locked) – send ACK so they stop retrying
+    debug('handleLockResponse() – imei=', imei, 'command=', command, 'status=', status, 'params=', params && params.join(','));
+    if (status === "0") {
+        debug('handleLockResponse() – status 0 (success), sending ACK');
         sendAck(imei, command);
-    } else if (status === "3") requestNewKey(imei);
-    else console.log(`❌ ${command} failed for ${imei} (status ${status})`);
+    } else if (status === "1") {
+        debug('handleLockResponse() – status 1 (state), sending ACK');
+        sendAck(imei, command);
+    } else if (status === "3") {
+        debug('handleLockResponse() – status 3 (key expired), requesting new key');
+        requestNewKey(imei);
+    } else {
+        console.log(`❌ ${command} failed for ${imei} (status ${status})`);
+        debug('handleLockResponse() – unhandled status', status);
+    }
 }
 
 // Send Acknowledgment
 function sendAck(imei, command) {
-    if (!clients.has(imei)) return;
+    debug('sendAck() – imei=', imei, 'command=', command);
+    if (!clients.has(imei)) {
+        debug('sendAck() – no client, return');
+        return;
+    }
     const client = clients.get(imei);
-    if (client.socket.destroyed) return; // no log spam; client will be removed on 'close'
-    client.socket.write(`*BGCS,OM,${imei},Re,${command}#\n`);
+    if (client.socket.destroyed) {
+        debug('sendAck() – socket destroyed, skip');
+        return;
+    }
+    const ackMsg = `*BGCS,OM,${imei},Re,${command}#\n`;
+    debug('sendAck() – SENDING (TCP):', ackMsg.trim());
+    client.socket.write(ackMsg);
     console.log(`✅ Sent ACK for ${command} to ${imei}`);
 }
 
 // Handle Alarm Trigger
 function handleAlarm(imei, status) {
     console.log(`🚨 Alarm triggered on ${imei}. Status: ${status}`);
+    debug('handleAlarm() – imei=', imei, 'status=', status);
 }
 
 // Handle Find Lock (Alarm Sound)
 function handleFindLock(imei) {
     console.log(`🔊 Lock ${imei} is sounding an alarm!`);
+    debug('handleFindLock() – imei=', imei);
 }
 
 // Restart Lock
 function restartLock(imei) {
+    debug('restartLock() – imei=', imei, 'clients.has(imei)=', clients.has(imei));
     if (!clients.has(imei)) return;
-    clients.get(imei).socket.write(`*BGCS,OM,${imei},S1#\n`);
+    const msg = `*BGCS,OM,${imei},S1#\n`;
+    debug('restartLock() – SENDING (TCP):', msg.trim());
+    clients.get(imei).socket.write(msg);
     console.log(`🔄 Restarted lock ${imei}`);
 }
 
 async function getDeviceStatus(imei) {
+    debug('getDeviceStatus() – imei=', imei);
     if (!clients.has(imei)) {
         console.log(`❌ Lock ${imei} is not connected.`);
+        debug('getDeviceStatus() – no client, return null');
         return null;
     }
 
     const client = clients.get(imei);
+    debug('getDeviceStatus() – starting command sequence');
     let deviceInfo = {
         imei: imei,
         battery: null,
@@ -328,10 +418,12 @@ async function getDeviceStatus(imei) {
     const commands = ['Q0', 'H0', 'R0', 'L0', 'L1', 'S5', 'W0'];
 
     for (const command of commands) {
+        debug('getDeviceStatus() – sending command', command);
         await sendCommandAndProcessResponse(client, imei, command, deviceInfo);
     }
 
     console.log("📊 Device Information Collected:", deviceInfo);
+    debug('getDeviceStatus() – done, returning deviceInfo');
     return deviceInfo;
 }
 
@@ -340,17 +432,20 @@ function sendCommandAndProcessResponse(client, imei, command, deviceInfo) {
     return new Promise((resolve) => {
         const commandString = `*BGCS,OM,${imei},${command}#\n`;
         console.log(`🚀 Sending command: ${command} to ${imei}`);
+        debug('sendCommandAndProcessResponse() – SENDING (TCP):', commandString.trim());
         client.socket.write(commandString);
 
         const timeout = setTimeout(() => {
             console.log(`⚠ Timeout waiting for response to ${command} from ${imei}`);
+            debug('sendCommandAndProcessResponse() – timeout for', command, imei);
             resolve();
-        }, 5000); // Timeout after 5 seconds
+        }, 5000);
 
         client.socket.once('data', (data) => {
             clearTimeout(timeout);
             const message = data.toString().trim();
             console.log(`📩 Received response: ${message}`);
+            debug('sendCommandAndProcessResponse() – received data for', command, 'length=', message.length);
 
             processDeviceResponse(imei, command, message, deviceInfo);
             resolve();
@@ -360,13 +455,16 @@ function sendCommandAndProcessResponse(client, imei, command, deviceInfo) {
 
 // ** Process Device Response & Store in `deviceInfo` **
 function processDeviceResponse(imei, command, message, deviceInfo) {
+    debug('processDeviceResponse() – imei=', imei, 'command=', command, 'message length=', message.length);
     const match = message.match(/\*BGCR,OM,(\d{15}),(Q0|H0|R0|L0|L1|S5|W0|S1|S8),(.+)#/);
     if (!match) {
         console.log(`⚠ Unexpected response format from ${imei}: ${message}`);
+        debug('processDeviceResponse() – no regex match');
         return;
     }
 
     const params = match[3].split(',');
+    debug('processDeviceResponse() – matched, params count=', params.length);
 
     switch (command) {
         case 'Q0':
