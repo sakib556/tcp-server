@@ -115,7 +115,12 @@ function processData(imei, command, params) {
             break;
         case 'L0': // Unlock Response
         case 'L1': // Lock Response
-            handleLockResponse(imei, command, params[0]);
+            // Some devices send key in L0/L1 response (params[1]) – store if we don't have one
+            if (!client.key && params[1]) {
+                client.key = params[1];
+                console.log(`🔑 Stored key for lock ${imei} (from ${command} response): ${client.key}`);
+            }
+            handleLockResponse(imei, command, params[0], params);
             break;
         case 'S5': // Device Info
             console.log(`ℹ️ Device Info for ${imei}: Battery ${params[0]}mV, GSM: ${params[2]}, Status: ${params[3]}`);
@@ -245,10 +250,14 @@ function requestNewKey(imei) {
 }
 
 // Handle Lock Responses
-function handleLockResponse(imei, command, status) {
+// Status: 0 = success, 1 = state (e.g. locked/unlocked), 3 = key expired
+function handleLockResponse(imei, command, status, params) {
     if (status === "0") sendAck(imei, command);
-    else if (status === "3") requestNewKey(imei);
-    else console.log(`❌ ${command} failed for ${imei}`);
+    else if (status === "1") {
+        // Many devices use 1 for "current state" (e.g. locked) – send ACK so they stop retrying
+        sendAck(imei, command);
+    } else if (status === "3") requestNewKey(imei);
+    else console.log(`❌ ${command} failed for ${imei} (status ${status})`);
 }
 
 // Send Acknowledgment
