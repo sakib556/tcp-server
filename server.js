@@ -4,6 +4,16 @@ const readline = require('readline');
 const PORT = 12345;
 const HOST = '0.0.0.0';
 
+// Protocol V2.1.8: "0xFFFF, in HEX format, must be added before the command header when the server sends commands"
+const SERVER_CMD_PREFIX = Buffer.from([0xff, 0xff]);
+
+/** Send a server->lock command. Prepends 0xFFFF per protocol; command must end with #\\n */
+function writeServerCommand(socket, commandString) {
+    const buf = Buffer.concat([SERVER_CMD_PREFIX, Buffer.from(commandString, 'utf8')]);
+    socket.write(buf);
+    if (DEBUG) debug('writeServerCommand() – bytes:', buf.length, 'hex prefix:', buf.slice(0, 2).toString('hex'));
+}
+
 // Set to false to disable [DEBUG] logs (e.g. in production)
 const DEBUG = true;
 function debug(...args) {
@@ -161,9 +171,10 @@ function processData(imei, command, params) {
             console.log(`ℹ️ Device Info for ${imei}: Battery ${params[0]}mV, GSM: ${params[2]}, Status: ${params[3]}`);
             debug('processData() S5 – device info');
             break;
-        case 'W0': // Alarm Triggered
+        case 'W0': // Alarm Triggered – protocol 2.8: server must respond with Re,W0
             debug('processData() W0 – alarm status=', params[0]);
             handleAlarm(imei, params[0]);
+            sendAck(imei, 'W0');
             break;
         case 'S1': // Restart Lock
             debug('processData() S1 – delegating to restartLock');
@@ -251,8 +262,8 @@ function sendUnlockCommand(imei) {
 
     const ts = Math.floor(Date.now() / 1000);
     const unlockCommand = `*BGCS,OM,${imei},L0,${client.key},20,${ts}#\n`;
-    debug('sendUnlockCommand() – SENDING (TCP):', unlockCommand.trim());
-    client.socket.write(unlockCommand);
+    debug('sendUnlockCommand() – SENDING (TCP with 0xFFFF):', unlockCommand.trim());
+    writeServerCommand(client.socket, unlockCommand);
     console.log(`✅ Sent UNLOCK to ${imei}`);
 }
 
@@ -295,8 +306,8 @@ function sendLockCommand(imei) {
     }
 
     const lockCommand = `*BGCS,OM,${imei},L1,${client.key}#\n`;
-    debug('sendLockCommand() – SENDING (TCP):', lockCommand.trim());
-    client.socket.write(lockCommand);
+    debug('sendLockCommand() – SENDING (TCP with 0xFFFF):', lockCommand.trim());
+    writeServerCommand(client.socket, lockCommand);
     console.log(`✅ Sent LOCK to ${imei}`);
 }
 
@@ -309,8 +320,8 @@ function requestNewKey(imei) {
     }
     const ts = Math.floor(Date.now() / 1000);
     const msg = `*BGCS,OM,${imei},R0,0,300,20,${ts}#\n`;
-    debug('requestNewKey() – SENDING (TCP):', msg.trim());
-    clients.get(imei).socket.write(msg);
+    debug('requestNewKey() – SENDING (TCP with 0xFFFF):', msg.trim());
+    writeServerCommand(clients.get(imei).socket, msg);
     console.log(`🔄 Requested new key for ${imei} (watch for device reply with R0,key in *BGCR,OM,...)`);
 }
 
@@ -346,8 +357,8 @@ function sendAck(imei, command) {
         return;
     }
     const ackMsg = `*BGCS,OM,${imei},Re,${command}#\n`;
-    debug('sendAck() – SENDING (TCP):', ackMsg.trim());
-    client.socket.write(ackMsg);
+    debug('sendAck() – SENDING (TCP with 0xFFFF):', ackMsg.trim());
+    writeServerCommand(client.socket, ackMsg);
     console.log(`✅ Sent ACK for ${command} to ${imei}`);
 }
 
@@ -368,8 +379,8 @@ function restartLock(imei) {
     debug('restartLock() – imei=', imei, 'clients.has(imei)=', clients.has(imei));
     if (!clients.has(imei)) return;
     const msg = `*BGCS,OM,${imei},S1#\n`;
-    debug('restartLock() – SENDING (TCP):', msg.trim());
-    clients.get(imei).socket.write(msg);
+    debug('restartLock() – SENDING (TCP with 0xFFFF):', msg.trim());
+    writeServerCommand(clients.get(imei).socket, msg);
     console.log(`🔄 Restarted lock ${imei}`);
 }
 
@@ -432,8 +443,8 @@ function sendCommandAndProcessResponse(client, imei, command, deviceInfo) {
     return new Promise((resolve) => {
         const commandString = `*BGCS,OM,${imei},${command}#\n`;
         console.log(`🚀 Sending command: ${command} to ${imei}`);
-        debug('sendCommandAndProcessResponse() – SENDING (TCP):', commandString.trim());
-        client.socket.write(commandString);
+        debug('sendCommandAndProcessResponse() – SENDING (TCP with 0xFFFF):', commandString.trim());
+        writeServerCommand(client.socket, commandString);
 
         const timeout = setTimeout(() => {
             console.log(`⚠ Timeout waiting for response to ${command} from ${imei}`);
