@@ -84,13 +84,10 @@ function incomingData(socket, data) {
     }
 
     if (!clients.has(imei)) {
-    clients.set(imei, { socket, key: null, lastSeen: Date.now() });
-    console.log(`✅ Lock ${imei} connected. Fetching device status...`);
-    
-    // Call `getDeviceStatus(imei)` after a short delay to ensure the lock is ready
-    setTimeout(() => {
-        getDeviceStatus(imei);
-        }, 2000); // Wait 2 seconds before sending status requests
+        clients.set(imei, { socket, key: null, lastSeen: Date.now() });
+        console.log(`✅ Lock ${imei} connected.`);
+        // Do NOT call getDeviceStatus here: it sends S1 (restart) and S8 (beep), causes timeouts
+        // and can disconnect the lock. Unlock/lock work from normal Q0/H0/R0 traffic only.
     }
 
     clients.get(imei).lastSeen = Date.now();
@@ -239,7 +236,6 @@ function sendLockCommand(imei) {
     console.log(`✅ Sent LOCK to ${imei}`);
 }
 
-
 // Request New Key (server asks lock to send key; lock should reply with *BGCR,OM,imei,R0,key,...#)
 function requestNewKey(imei) {
     if (!clients.has(imei)) return;
@@ -318,7 +314,9 @@ async function getDeviceStatus(imei) {
         lastSeen: null
     };
 
-    const commands = ['Q0', 'H0', 'R0', 'L0', 'L1', 'S5', 'W0', 'S1', 'S8'];
+    // Do not include S1 (restart) or S8 (beep) – they disrupt the lock and cause timeouts
+   // const commands = ['Q0', 'H0', 'R0', 'L0', 'L1', 'S5', 'W0','S1','S8'];
+    const commands = ['Q0', 'H0', 'R0', 'L0', 'L1', 'S5', 'W0'];
 
     for (const command of commands) {
         await sendCommandAndProcessResponse(client, imei, command, deviceInfo);
