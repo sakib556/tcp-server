@@ -503,10 +503,17 @@ function processDeviceResponse(imei, command, message, deviceInfo) {
             if (params[0] === "3") deviceInfo.operationKeyExpired = true;
             break;
         case 'S5':
-            deviceInfo.batteryPercentage = params[0] || null;
-            deviceInfo.gsmSignal = params[1] || null;
-            deviceInfo.simICCID = params[2] || null;
-            deviceInfo.blockStatus = params[3] || null;
+            // Protocol 2.3: voltage, percentage, signal, lockStatus, carDetected, leverPosition, ICCID, APN, MAC, autoLock
+            deviceInfo.batteryVoltage = params[0] || null;
+            deviceInfo.batteryPercentage = params[1] || null;
+            deviceInfo.gsmSignal = params[2] || null;
+            deviceInfo.lockStatus = params[3] || null;   // 1:lock, 0:unlock
+            deviceInfo.carDetected = params[4] === "1";
+            deviceInfo.lockLeverPosition = params[5] || null; // 1:horizontal, 2:upright, 3:other
+            deviceInfo.simICCID = params[6] || null;
+            deviceInfo.simAPN = params[7] || null;
+            deviceInfo.macAddress = params[8] || null;   // Bluetooth MAC
+            deviceInfo.autoLock = params[9] === "1";
             break;
         case 'W0':
             deviceInfo.alarmStatus = params[0] || null;
@@ -530,4 +537,4 @@ if (require.main === module) {
 }
 
 // Export for `api.js` (TCP + API in one process)
-module.exports = { sendUnlockCommand, sendLockCommand, createTCP };
+module.exports = { sendUnlockCommand, sendLockCommand, createTCP, getDeviceStatus };
