@@ -134,7 +134,7 @@ function processOneMessage(socket, message) {
     if (waiter) {
         clearTimeout(waiter.timeoutId);
         pendingResponseWaiters.delete(waiterKey);
-        const fullMessage = (normalized.startsWith('*') ? normalized : `*BGCR,OM,${imei},${command},${params.join(',')}`) + '#';
+        const fullMessage = (trimmed.startsWith('*') ? trimmed : `*BGCR,OM,${imei},${command},${params.join(',')}`) + '#';
         waiter.resolve({ message: fullMessage, params, command, imei });
     }
     debug('processOneMessage() – calling processData(', imei, command, params.length, 'params)');
