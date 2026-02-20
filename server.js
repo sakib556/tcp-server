@@ -325,22 +325,31 @@ function requestNewKey(imei) {
     console.log(`🔄 Requested new key for ${imei} (watch for device reply with R0,key in *BGCR,OM,...)`);
 }
 
-// Handle Lock Responses
-// Status: 0 = success, 1 = state (e.g. locked/unlocked), 3 = key expired
+// Handle Lock Responses (Protocol V2.1.8: L0/L1 status 0=success, 1=failed, 2=KEY incorrect or invalid)
+// Server must always send Re,L0# or Re,L1# after lock response.
 function handleLockResponse(imei, command, status, params) {
     debug('handleLockResponse() – imei=', imei, 'command=', command, 'status=', status, 'params=', params && params.join(','));
     if (status === "0") {
         debug('handleLockResponse() – status 0 (success), sending ACK');
         sendAck(imei, command);
     } else if (status === "1") {
-        debug('handleLockResponse() – status 1 (state), sending ACK');
+        debug('handleLockResponse() – status 1 (failed), sending ACK');
+        console.log(`⚠️ ${command} failed for ${imei} (status 1 – operation failed)`);
         sendAck(imei, command);
+    } else if (status === "2") {
+        // Protocol V2.1.8: status 2 = "The KEY is incorrect or invalid" – send ACK then request new key
+        debug('handleLockResponse() – status 2 (KEY incorrect or invalid), sending ACK and requesting new key');
+        console.log(`⚠️ ${command} for ${imei} – status 2 (KEY incorrect or invalid), ACK sent, requesting new key`);
+        sendAck(imei, command);
+        requestNewKey(imei);
     } else if (status === "3") {
-        debug('handleLockResponse() – status 3 (key expired), requesting new key');
+        debug('handleLockResponse() – status 3 (key expired), sending ACK and requesting new key');
+        sendAck(imei, command);
         requestNewKey(imei);
     } else {
         console.log(`❌ ${command} failed for ${imei} (status ${status})`);
         debug('handleLockResponse() – unhandled status', status);
+        sendAck(imei, command); // still ACK per protocol so device gets server response
     }
 }
 
@@ -495,12 +504,12 @@ function processDeviceResponse(imei, command, message, deviceInfo) {
             deviceInfo.operationKey = params[1] || null;
             break;
         case 'L0':
-            deviceInfo.unlockStatus = params[0] === "0" ? "Success" : "Failed";
-            if (params[0] === "3") deviceInfo.operationKeyExpired = true;
+            deviceInfo.unlockStatus = params[0] === "0" ? "Success" : (params[0] === "2" ? "KeyInvalid" : "Failed");
+            if (params[0] === "2" || params[0] === "3") deviceInfo.operationKeyExpired = true;
             break;
         case 'L1':
-            deviceInfo.lockStatusResponse = params[0] === "0" ? "Success" : "Failed";
-            if (params[0] === "3") deviceInfo.operationKeyExpired = true;
+            deviceInfo.lockStatusResponse = params[0] === "0" ? "Success" : (params[0] === "2" ? "KeyInvalid" : "Failed");
+            if (params[0] === "2" || params[0] === "3") deviceInfo.operationKeyExpired = true;
             break;
         case 'S5':
             // Protocol 2.3: voltage, percentage, signal, lockStatus, carDetected, leverPosition, ICCID, APN, MAC, autoLock

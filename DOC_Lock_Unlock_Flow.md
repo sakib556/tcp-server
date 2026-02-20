@@ -145,8 +145,8 @@ So the key is **received from the lock over TCP** (R0 message); the server only 
 | Lock | → Server | `*BGCR,OM,IMEI,Q0,...#` | Sign-in |
 | Lock | → Server | `*BGCR,OM,IMEI,H0,...#` | Heartbeat (battery, GSM) |
 | Lock | → Server | `*BGCR,OM,IMEI,R0,0,key,...#` | Key (key = number server stores) |
-| Lock | → Server | `*BGCR,OM,IMEI,L0,0,...#` | Unlock success (0) or fail |
-| Lock | → Server | `*BGCR,OM,IMEI,L1,0,...#` | Lock success (0) or fail |
+| Lock | → Server | `*BGCR,OM,IMEI,L0,status,...#` | Unlock (Protocol V2.1.8): 0=success, 1=failed, 2=KEY incorrect or invalid |
+| Lock | → Server | `*BGCR,OM,IMEI,L1,status,...#` | Lock (Protocol V2.1.8): 0=success, 1=failed, 2=KEY incorrect or invalid |
 | Server | → Lock | `*BGCS,OM,IMEI,R0,0,300,20,timestamp#` | Please send your key |
 | Server | → Lock | `*BGCS,OM,IMEI,L0,key,20,timestamp#` | Unlock |
 | Server | → Lock | `*BGCS,OM,IMEI,L1,key#` | Lock |
@@ -177,8 +177,24 @@ So the key is **received from the lock over TCP** (R0 message); the server only 
 
 ## 8. One-Line Summary
 
-- **Unlock:** You send IMEI over HTTP → server sends **L0 + key** over TCP → lock unlocks and replies **L0,0** → server sends **ACK** over TCP.  
+- **Unlock:** You send IMEI over HTTP → server sends **L0 + key** over TCP → lock unlocks and replies **L0,status** → server sends **ACK** over TCP.  
 - **Lock:** Same, but **L1** instead of L0.  
-- The **key** is always received from the lock (R0) over TCP and stored; the server then sends it with every L0/L1 command.
+- The **key** is always received from the lock (R0 or from L0/L1 response params) over TCP and stored; the server then sends it with every L0/L1 command.
+
+---
+
+## 9. Why lock/unlock might not move the device (and what was fixed)
+
+- **Protocol V2.1.8:** The server **must** send **ACK** (`*BGCS,OM,IMEI,Re,L0#` or `Re,L1#`) after every L0/L1 response from the lock. The protocol defines L0/L1 status as: **0** = success, **1** = operation failed, **2** = KEY incorrect or invalid.
+- **Status 2** means the **key is wrong or invalid** (not "already unlocked"). The server now: (1) always sends ACK for any status, (2) on status 2 or 3 requests a new key (R0) so the next lock/unlock uses a fresh key.
+- **0xFFFF:** Per protocol, server commands must have **0xFFFF** (HEX) before the command header; the code does this in `writeServerCommand()`. Commands end with `#` and newline.
+- If the lock does not move: (1) Status 0 = success (lock should move). (2) Status 1 = operation failed (device-side). (3) Status 2 = get a new key (R0) and retry; the server now auto-requests new key on status 2.
+
+**Protocol V2.1.8 compliance check (TCP part):**
+- ✅ Server sends all commands with **0xFFFF** prefix (HEX) before header; command ends with `#` and `\n`.
+- ✅ **R0:** Server→Lock `*BGCS,OM,IMEI,R0,0,300,20,timestamp#` (0=unlock op, 300s, User ID 20). Lock replies with key in R0 response; server stores it.
+- ✅ **L0:** Server→Lock `*BGCS,OM,IMEI,L0,key,20,timestamp#`. Lock→Server `*BGCR,OM,IMEI,L0,status,userID,timestamp#`. Status 0=success, 1=failed, 2=KEY invalid. Server replies `*BGCS,OM,IMEI,Re,L0#`.
+- ✅ **L1:** Server→Lock `*BGCS,OM,IMEI,L1,key#`. Lock→Server `*BGCR,OM,IMEI,L1,status,...#`. Server replies `*BGCS,OM,IMEI,Re,L1#`.
+- ✅ **W0 (alarm):** Lock→Server `*BGCR,OM,IMEI,W0,content#`. Server must reply `*BGCS,OM,IMEI,Re,W0#`.
 
 You can save this file as a .md or copy it into a Word doc if you need a “doc file” on your side.
