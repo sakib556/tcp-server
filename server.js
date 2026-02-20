@@ -92,7 +92,7 @@ function processOneMessage(socket, message) {
     if (match) {
         imei = match[1];
         command = match[2];
-        params = match[3].split(',');
+        params = match[3].replace(/\s+/g, '').split(','); // remove any remaining whitespace before split
         debug('processOneMessage() – parsed BGCR: imei=', imei, 'command=', command, 'params=', params.join(','));
     } else {
         const bgckMatch = trimmed.match(BGCK_REGEX);
@@ -134,7 +134,7 @@ function processOneMessage(socket, message) {
     if (waiter) {
         clearTimeout(waiter.timeoutId);
         pendingResponseWaiters.delete(waiterKey);
-        const fullMessage = (trimmed.startsWith('*') ? trimmed : `*BGCR,OM,${imei},${command},${params.join(',')}`) + '#';
+        const fullMessage = (normalized.startsWith('*') ? normalized : `*BGCR,OM,${imei},${command},${params.join(',')}`) + '#';
         waiter.resolve({ message: fullMessage, params, command, imei });
     }
     debug('processOneMessage() – calling processData(', imei, command, params.length, 'params)');
@@ -479,9 +479,16 @@ async function getDeviceStatus(imei) {
 }
 
 // ** Send Command & Wait for Response (only resolves when message command matches) **
+// Per protocol V2.1.8: R0 requires params (operation, validTime, userID, timestamp); S5 and W0 use CMD# only.
 function sendCommandAndProcessResponse(client, imei, command, deviceInfo) {
     return new Promise((resolve) => {
-        const commandString = `*BGCS,OM,${imei},${command}#\n`;
+        let commandString;
+        if (command === 'R0') {
+            const ts = Math.floor(Date.now() / 1000);
+            commandString = `*BGCS,OM,${imei},R0,0,300,20,${ts}#\n`;
+        } else {
+            commandString = `*BGCS,OM,${imei},${command}#\n`;
+        }
         console.log(`🚀 Sending command: ${command} to ${imei}`);
         debug('sendCommandAndProcessResponse() – SENDING (TCP with 0xFFFF):', commandString.trim());
         writeServerCommand(client.socket, commandString);
@@ -512,7 +519,8 @@ function sendCommandAndProcessResponse(client, imei, command, deviceInfo) {
 // ** Process Device Response & Store in `deviceInfo` **
 function processDeviceResponse(imei, commandFromMessage, message, deviceInfo) {
     debug('processDeviceResponse() – imei=', imei, 'command=', commandFromMessage, 'message length=', message.length);
-    const match = message.match(/\*BGCR,OM,(\d{15}),(Q0|H0|R0|L0|L1|S5|W0|S1|S8),(.+)#/);
+    const normalizedMsg = message.replace(/\s+/g, ' ').trim();
+    const match = normalizedMsg.match(/\*BGCR,OM,(\d{15}),(Q0|H0|R0|L0|L1|S5|W0|S1|S8),([\s\S]+)#/);
     if (!match) {
         console.log(`⚠ Unexpected response format from ${imei}: ${message.substring(0, 100)}`);
         debug('processDeviceResponse() – no regex match');
@@ -520,7 +528,7 @@ function processDeviceResponse(imei, commandFromMessage, message, deviceInfo) {
     }
 
     const responseCommand = match[2];
-    const params = match[3].split(',');
+    const params = match[3].replace(/\s+/g, '').split(',');
     debug('processDeviceResponse() – matched', responseCommand, 'params count=', params.length);
 
     switch (responseCommand) {

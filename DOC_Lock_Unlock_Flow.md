@@ -2,6 +2,8 @@
 
 This doc explains **what happens when you hit the Lock or Unlock API**: what the code does, and what is **sent** and **received** over TCP.
 
+**Verified working example with real logs and message formats:** see **[WORKING_SYSTEM_EXAMPLE.md](./WORKING_SYSTEM_EXAMPLE.md)**.
+
 ---
 
 ## 1. Two Parts of the System
