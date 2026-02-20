@@ -71,8 +71,9 @@ function createTCP() {
 }
 
 // Per-socket buffer for TCP stream (messages can be concatenated or split across packets)
-const BGCR_REGEX = /\*BGCR,OM,(\d{15}),(Q0|H0|R0|L0|L1|S5|W0|S1|S8),(.+)$/;
-const BGCK_REGEX = /BGCK,ON,(\d{15}),([^,]*),(.+)$/;
+// [\s\S]+ matches any character including newlines (S5 can arrive with \n in middle when TCP splits packet)
+const BGCR_REGEX = /\*BGCR,OM,(\d{15}),(Q0|H0|R0|L0|L1|S5|W0|S1|S8),([\s\S]+)$/;
+const BGCK_REGEX = /BGCK,ON,(\d{15}),([^,]*),([\s\S]+)$/;
 
 function processOneMessage(socket, message) {
     const trimmed = message.trim();
