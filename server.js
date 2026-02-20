@@ -17,10 +17,12 @@ function writeServerCommand(socket, commandString) {
 // Set to false to disable [DEBUG] logs (e.g. in production)
 const DEBUG = true;
 function debug(...args) {
-    if (DEBUG) console.log('[DEBUG]', ...args);
+    console.log('[DEBUG]', ...args);
 }
 
 const clients = new Map(); // IMEI -> { socket, key, battery, status, lastSeen, gsmSignal, alarm, autolock }
+// Pending response waiters for getDeviceStatus: key = "imei:command", value = { resolve, timeoutId }
+const pendingResponseWaiters = new Map();
 
 // Connection check: use socket.destroyed only. Do NOT use socket.writable – writable can be
 // false when the write buffer is full (TCP backpressure) but the connection is still alive and
@@ -68,37 +70,37 @@ function createTCP() {
     });
 }
 
-// Handle Incoming Data
-function incomingData(socket, data) {
-    const raw = data.toString();
-    const message = raw.trim();
-    console.log(`📩 Data received: ${message}`);
-    debug('incomingData() – raw length:', raw.length, 'trimmed length:', message.length);
+// Per-socket buffer for TCP stream (messages can be concatenated or split across packets)
+const BGCR_REGEX = /\*BGCR,OM,(\d{15}),(Q0|H0|R0|L0|L1|S5|W0|S1|S8),(.+)$/;
+const BGCK_REGEX = /BGCK,ON,(\d{15}),([^,]*),(.+)$/;
+
+function processOneMessage(socket, message) {
+    const trimmed = message.trim();
+    if (!trimmed) return;
 
     // **Handle Manual Commands (unlock, lock, restart)**
-    if (message.startsWith("unlock ") || message.startsWith("lock ") || message.startsWith("restart ")) {
-        debug('incomingData() – treating as manual command:', message.substring(0, 30) + '...');
-        echoCommands(message);
+    if (trimmed.startsWith("unlock ") || trimmed.startsWith("lock ") || trimmed.startsWith("restart ")) {
+        debug('processOneMessage() – manual command:', trimmed.substring(0, 30) + '...');
+        echoCommands(trimmed);
         return;
     }
 
     // **Handle Lock Protocol Messages** (expected: *BGCR,OM,IMEI,COMMAND,params#)
-    let match = message.match(/\*BGCR,OM,(\d{15}),(Q0|H0|R0|L0|L1|S5|W0|S1|S8),(.+)#/);
+    let match = trimmed.match(BGCR_REGEX);
     let imei, command, params;
 
     if (match) {
         imei = match[1];
         command = match[2];
         params = match[3].split(',');
-        debug('incomingData() – parsed BGCR: imei=', imei, 'command=', command, 'params=', params.join(','));
+        debug('processOneMessage() – parsed BGCR: imei=', imei, 'command=', command, 'params=', params.join(','));
     } else {
-        // Some devices send BGCK,ON,IMEI,keyOrNo,...# (e.g. heartbeat/status)
-        const bgckMatch = message.match(/BGCK,ON,(\d{15}),([^,]*),(.+)#/);
+        const bgckMatch = trimmed.match(BGCK_REGEX);
         if (bgckMatch) {
             imei = bgckMatch[1];
             const keyOrNo = (bgckMatch[2] || '').trim();
             const rest = (bgckMatch[3] || '').split(',');
-            debug('incomingData() – parsed BGCK: imei=', imei, 'keyOrNo=', keyOrNo);
+            debug('processOneMessage() – parsed BGCK: imei=', imei, 'keyOrNo=', keyOrNo);
             if (!clients.has(imei)) {
                 clients.set(imei, { socket, key: null, lastSeen: Date.now() });
                 console.log(`✅ Lock ${imei} connected (BGCK format).`);
@@ -114,20 +116,49 @@ function incomingData(socket, data) {
             }
             return;
         }
-        console.log("⚠ Received unknown data:", message);
-        debug('incomingData() – no BGCR/BGCK match for:', message.substring(0, 80));
+        console.log("⚠ Received unknown data:", trimmed.substring(0, 80));
+        debug('processOneMessage() – no BGCR/BGCK match');
         return;
     }
 
     if (!clients.has(imei)) {
         clients.set(imei, { socket, key: null, lastSeen: Date.now() });
         console.log(`✅ Lock ${imei} connected.`);
-        debug('incomingData() – new client added for', imei, '; total clients:', clients.size);
+        debug('processOneMessage() – new client added for', imei, '; total clients:', clients.size);
     }
 
     clients.get(imei).lastSeen = Date.now();
-    debug('incomingData() – calling processData(', imei, command, params.length, 'params)');
+    // If getDeviceStatus is waiting for this exact command, resolve it with this message
+    const waiterKey = `${imei}:${command}`;
+    const waiter = pendingResponseWaiters.get(waiterKey);
+    if (waiter) {
+        clearTimeout(waiter.timeoutId);
+        pendingResponseWaiters.delete(waiterKey);
+        const fullMessage = (trimmed.startsWith('*') ? trimmed : `*BGCR,OM,${imei},${command},${params.join(',')}`) + '#';
+        waiter.resolve({ message: fullMessage, params, command, imei });
+    }
+    debug('processOneMessage() – calling processData(', imei, command, params.length, 'params)');
     processData(imei, command, params);
+}
+
+// Handle Incoming Data – split by # so every message is processed (L1/L0 not dropped after H0)
+function incomingData(socket, data) {
+    if (!socket._inBuffer) socket._inBuffer = '';
+    socket._inBuffer += data.toString();
+
+    let idx;
+    while ((idx = socket._inBuffer.indexOf('#')) >= 0) {
+        const message = socket._inBuffer.substring(0, idx);
+        socket._inBuffer = socket._inBuffer.substring(idx + 1);
+        console.log(`📩 Data received: ${message.trim()}#`);
+        debug('incomingData() – processing one message, length:', message.length);
+        processOneMessage(socket, message);
+    }
+    // Keep max buffer size to avoid memory growth on bad data (no #)
+    if (socket._inBuffer.length > 2048) {
+        debug('incomingData() – buffer overflow, discarding', socket._inBuffer.length, 'bytes');
+        socket._inBuffer = '';
+    }
 }
 
 
@@ -433,9 +464,9 @@ async function getDeviceStatus(imei) {
         lastSeen: null
     };
 
-    // Do not include S1 (restart) or S8 (beep) – they disrupt the lock and cause timeouts
-   // const commands = ['Q0', 'H0', 'R0', 'L0', 'L1', 'S5', 'W0','S1','S8'];
-    const commands = ['Q0', 'H0', 'R0', 'L0', 'L1', 'S5', 'W0'];
+    // Per protocol V2.1.8: Q0/H0 are Lock->Server only (no server request). L0/L1 need key+params.
+    // So we only request R0 (key), S5 (full device info), W0 (alarm status) to get reliable responses.
+    const commands = ['R0', 'S5', 'W0'];
 
     for (const command of commands) {
         debug('getDeviceStatus() – sending command', command);
@@ -447,7 +478,7 @@ async function getDeviceStatus(imei) {
     return deviceInfo;
 }
 
-// ** Send Command & Wait for Response **
+// ** Send Command & Wait for Response (only resolves when message command matches) **
 function sendCommandAndProcessResponse(client, imei, command, deviceInfo) {
     return new Promise((resolve) => {
         const commandString = `*BGCS,OM,${imei},${command}#\n`;
@@ -455,38 +486,44 @@ function sendCommandAndProcessResponse(client, imei, command, deviceInfo) {
         debug('sendCommandAndProcessResponse() – SENDING (TCP with 0xFFFF):', commandString.trim());
         writeServerCommand(client.socket, commandString);
 
-        const timeout = setTimeout(() => {
-            console.log(`⚠ Timeout waiting for response to ${command} from ${imei}`);
-            debug('sendCommandAndProcessResponse() – timeout for', command, imei);
+        const timeoutId = setTimeout(() => {
+            if (pendingResponseWaiters.get(`${imei}:${command}`)) {
+                pendingResponseWaiters.delete(`${imei}:${command}`);
+                console.log(`⚠ Timeout waiting for response to ${command} from ${imei}`);
+                debug('sendCommandAndProcessResponse() – timeout for', command, imei);
+            }
             resolve();
         }, 5000);
 
-        client.socket.once('data', (data) => {
-            clearTimeout(timeout);
-            const message = data.toString().trim();
-            console.log(`📩 Received response: ${message}`);
-            debug('sendCommandAndProcessResponse() – received data for', command, 'length=', message.length);
-
-            processDeviceResponse(imei, command, message, deviceInfo);
-            resolve();
+        pendingResponseWaiters.set(`${imei}:${command}`, {
+            timeoutId,
+            resolve: (result) => {
+                if (result && result.message) {
+                    console.log(`📩 Received response: ${result.message}`);
+                    debug('sendCommandAndProcessResponse() – matched response for', command);
+                    processDeviceResponse(imei, result.command, result.message, deviceInfo);
+                }
+                resolve();
+            }
         });
     });
 }
 
 // ** Process Device Response & Store in `deviceInfo` **
-function processDeviceResponse(imei, command, message, deviceInfo) {
-    debug('processDeviceResponse() – imei=', imei, 'command=', command, 'message length=', message.length);
+function processDeviceResponse(imei, commandFromMessage, message, deviceInfo) {
+    debug('processDeviceResponse() – imei=', imei, 'command=', commandFromMessage, 'message length=', message.length);
     const match = message.match(/\*BGCR,OM,(\d{15}),(Q0|H0|R0|L0|L1|S5|W0|S1|S8),(.+)#/);
     if (!match) {
-        console.log(`⚠ Unexpected response format from ${imei}: ${message}`);
+        console.log(`⚠ Unexpected response format from ${imei}: ${message.substring(0, 100)}`);
         debug('processDeviceResponse() – no regex match');
         return;
     }
 
+    const responseCommand = match[2];
     const params = match[3].split(',');
-    debug('processDeviceResponse() – matched, params count=', params.length);
+    debug('processDeviceResponse() – matched', responseCommand, 'params count=', params.length);
 
-    switch (command) {
+    switch (responseCommand) {
         case 'Q0':
             deviceInfo.battery = params[0] || null;
             deviceInfo.macAddress = params[1] || null;
@@ -523,6 +560,7 @@ function processDeviceResponse(imei, command, message, deviceInfo) {
             deviceInfo.simAPN = params[7] || null;
             deviceInfo.macAddress = params[8] || null;   // Bluetooth MAC
             deviceInfo.autoLock = params[9] === "1";
+            deviceInfo.lastSeen = new Date().toISOString();
             break;
         case 'W0':
             deviceInfo.alarmStatus = params[0] || null;
